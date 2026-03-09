@@ -9,19 +9,20 @@ import os
 # 加载环境变量
 load_dotenv()
 
-app = FastAPI()
-
 # 获取API配置
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.deepseek.com/v1")
 
+app = FastAPI()
+
 # 配置CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 在生产环境中应该设置具体的域名
+    allow_origins=["*"],  # 允许所有域名
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # 调用DeepSeek API
