@@ -3,6 +3,9 @@ import './App.css';
 
 const API_BASE_URL = 'https://offerme-sldu.onrender.com';
 
+// 添加调试信息
+console.log('API_BASE_URL:', API_BASE_URL);
+
 function App() {
   const [currentPage, setCurrentPage] = useState('home');
   const [savedResumes] = useState([]);

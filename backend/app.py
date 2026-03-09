@@ -1,17 +1,17 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import PyPDF2
-from dotenv import load_dotenv
 import json
 import httpx
 import os
 
-# 加载环境变量
-load_dotenv()
-
-# 获取API配置
+# 获取API配置 - 直接从环境变量读取（Render 会自动设置）
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.deepseek.com/v1")
+
+# 打印调试信息
+print(f"DEEPSEEK_API_KEY is set: {bool(DEEPSEEK_API_KEY)}")
+print(f"API_BASE_URL: {API_BASE_URL}")
 
 app = FastAPI()
 
