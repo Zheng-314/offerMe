@@ -9,9 +9,14 @@ import os
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.deepseek.com/v1")
 
-# 打印调试信息
+# 打印调试信息 - 显示所有环境变量
+print("=" * 50)
+print("Environment Variables Debug:")
+print(f"All env vars: {dict(os.environ)}")
 print(f"DEEPSEEK_API_KEY is set: {bool(DEEPSEEK_API_KEY)}")
+print(f"DEEPSEEK_API_KEY value: {DEEPSEEK_API_KEY[:10]}..." if DEEPSEEK_API_KEY else "DEEPSEEK_API_KEY value: (empty)")
 print(f"API_BASE_URL: {API_BASE_URL}")
+print("=" * 50)
 
 app = FastAPI()
 
