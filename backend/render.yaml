@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: offerme-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: API_BASE_URL
+        value: https://api.deepseek.com/v1
+    plan: free
