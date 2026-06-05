@@ -7,21 +7,12 @@ import httpx
 import os
 import random
 
-# 加载环境变量
+# 加载环境变量 - 必须在读取环境变量之前调用
 load_dotenv()
 
-# 获取API配置 - 直接从环境变量读取（Render 会自动设置）
+# 获取API配置 - 从环境变量读取
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.deepseek.com/v1")
-
-# 打印调试信息 - 显示所有环境变量
-print("=" * 50)
-print("Environment Variables Debug:")
-print(f"All env vars: {dict(os.environ)}")
-print(f"DEEPSEEK_API_KEY is set: {bool(DEEPSEEK_API_KEY)}")
-print(f"DEEPSEEK_API_KEY value: {DEEPSEEK_API_KEY[:10]}..." if DEEPSEEK_API_KEY else "DEEPSEEK_API_KEY value: (empty)")
-print(f"API_BASE_URL: {API_BASE_URL}")
-print("=" * 50)
 
 app = FastAPI()
 
@@ -38,15 +29,18 @@ app.add_middleware(
 # 调用DeepSeek API
 async def call_llm(messages: list, max_tokens: int = 1000, temperature: float = 0.7) -> str:
     """调用DeepSeek API，支持多轮对话"""
-    if not DEEPSEEK_API_KEY:
+    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+    api_base = os.getenv("API_BASE_URL", "https://api.deepseek.com/v1")
+
+    if not api_key:
         return "错误：未配置DEEPSEEK_API_KEY，请在backend/.env文件中配置"
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{API_BASE_URL}/chat/completions",
+                f"{api_base}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json"
                 },
                 json={
