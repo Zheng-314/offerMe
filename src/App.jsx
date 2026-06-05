@@ -208,24 +208,37 @@ function HomePage({ onStartInterview, onPageChange, savedResumes }) {
   );
 }
 
-// 面试页面
+// 面试页面 - 追问地狱模式
 function InterviewPage({ onPageChange, onSaveReport }) {
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
       content: '你好，欢迎参加这次模拟面试。请先用1-2分钟做一个简单的自我介绍，重点突出你的产品经理相关经历和优势。',
-      stage: '自我介绍'
+      stage: '自我介绍',
+      depth: 0
     }
   ]);
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [currentStage, setCurrentStage] = useState('自我介绍');
+  const [currentDepth, setCurrentDepth] = useState(0); // 追问深度
   const [showReport, setShowReport] = useState(false);
-  const [report, setReport] = useState(null);
+  const [report, setReport] = useState(false);
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
 
-  const [stageCount, setStageCount] = useState(1);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+
+  // 阶段流转配置：每个阶段最少追问轮数
+  const stageConfig = {
+    '自我介绍': { minRounds: 1, next: '简历针对性提问' },
+    '简历针对性提问': { minRounds: 4, next: '技术能力考察' },
+    '技术能力考察': { minRounds: 3, next: '结束与反馈' },
+    '结束与反馈': { minRounds: 0, next: null }
+  };
+
+  // 计算当前阶段已回答轮数
+  const currentStageRounds = messages.filter(m => m.stage === currentStage && m.role === 'user').length;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -236,14 +249,23 @@ function InterviewPage({ onPageChange, onSaveReport }) {
 
     const newMessage = {
       role: 'user',
-      content: inputValue
+      content: inputValue,
+      stage: currentStage,
+      depth: currentDepth
     };
 
-    setMessages([...messages, newMessage]);
+    const updatedMessages = [...messages, newMessage];
+    setMessages(updatedMessages);
     setInputValue('');
     setIsTyping(true);
 
     try {
+      // 构建对话历史（用于多轮对话）
+      const historyForApi = updatedMessages.slice(-10).map(m => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.content
+      }));
+
       const response = await fetch(`${API_BASE_URL}/api/get-interview-response`, {
         method: 'POST',
         headers: {
@@ -251,33 +273,40 @@ function InterviewPage({ onPageChange, onSaveReport }) {
         },
         body: new URLSearchParams({
           message: inputValue,
-          stage: currentStage
+          stage: currentStage,
+          depth: currentDepth.toString(),
+          history: JSON.stringify(historyForApi),
+          resume_context: ''
         })
       });
 
       const data = await response.json();
 
       if (data.success) {
-        let aiResponse = {
+        const aiResponse = {
           role: 'assistant',
           content: data.response,
-          stage: currentStage
+          stage: currentStage,
+          depth: data.depth
         };
 
-        let nextStage = currentStage;
-        let nextStageCount = stageCount;
+        const newMessages = [...updatedMessages, aiResponse];
+        setMessages(newMessages);
 
-        if (currentStage === '自我介绍') {
-          nextStage = '简历针对性提问';
-          nextStageCount = 2;
-        } else if (currentStage === '简历针对性提问' && stageCount >= 2) {
-          nextStage = '技术能力考察';
-          nextStageCount = 3;
-        } else if (currentStage === '技术能力考察') {
-          nextStage = '结束与反馈';
-          nextStageCount = 5;
-          setTimeout(async () => {
-            const conversation = JSON.stringify([...messages, newMessage, aiResponse]);
+        // 判断是否应该进入下一阶段
+        // AI可以通过返回特定关键词来触发阶段切换
+        const shouldSwitchStage = data.response.includes('[进入下一阶段]') ||
+          (stageConfig[currentStage] && currentStageRounds >= stageConfig[currentStage].minRounds && currentDepth >= 2);
+
+        if (shouldSwitchStage && stageConfig[currentStage]?.next) {
+          const nextStage = stageConfig[currentStage].next;
+          setCurrentStage(nextStage);
+          setCurrentDepth(0);
+
+          if (nextStage === '结束与反馈') {
+            // 生成报告
+            setIsGeneratingReport(true);
+            const conversation = JSON.stringify(newMessages);
             const reportResponse = await fetch(`${API_BASE_URL}/api/generate-report`, {
               method: 'POST',
               headers: {
@@ -297,12 +326,13 @@ function InterviewPage({ onPageChange, onSaveReport }) {
                 date: new Date().toLocaleDateString()
               });
             }
-          }, 1000);
+            setIsGeneratingReport(false);
+          }
+        } else {
+          // 继续追问
+          setCurrentDepth(data.depth || currentDepth + 1);
         }
 
-        setMessages(prev => [...prev, aiResponse]);
-        setCurrentStage(nextStage);
-        setStageCount(nextStageCount);
         setIsTyping(false);
       } else {
         setIsTyping(false);
@@ -314,6 +344,37 @@ function InterviewPage({ onPageChange, onSaveReport }) {
     }
   };
 
+  const handleEndInterview = async () => {
+    if (messages.length <= 1) return;
+
+    setIsGeneratingReport(true);
+    try {
+      const conversation = JSON.stringify(messages);
+      const reportResponse = await fetch(`${API_BASE_URL}/api/generate-report`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+          conversation: conversation
+        })
+      });
+
+      const reportData = await reportResponse.json();
+      if (reportData.success) {
+        setReport(reportData.report);
+        setShowReport(true);
+        onSaveReport({
+          ...reportData.report,
+          date: new Date().toLocaleDateString()
+        });
+      }
+    } catch (error) {
+      alert('生成报告失败：' + error.message);
+    }
+    setIsGeneratingReport(false);
+  };
+
   const handleBack = () => {
     onPageChange('home');
   };
@@ -321,6 +382,10 @@ function InterviewPage({ onPageChange, onSaveReport }) {
   if (showReport) {
     return <ReportPage report={report} onRestart={handleBack} />;
   }
+
+  // 追问深度显示
+  const depthLabels = ['初次提问', '细节追问', '挑战假设', '压力测试', '触及边界'];
+  const depthColors = ['bg-blue-100 text-blue-700', 'bg-green-100 text-green-700', 'bg-yellow-100 text-yellow-700', 'bg-orange-100 text-orange-700', 'bg-red-100 text-red-700'];
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-br from-gray-50 to-gray-100">
@@ -343,7 +408,18 @@ function InterviewPage({ onPageChange, onSaveReport }) {
             </div>
             <span className="text-gray-900 font-semibold text-lg">AI 面试官</span>
           </div>
-          <span className="text-sm text-gray-600 bg-gradient-to-r from-blue-50 to-blue-100 px-4 py-2 rounded-full border border-blue-200/50">{currentStage}</span>
+          <div className="flex items-center gap-3">
+            <span className={`text-sm px-3 py-1.5 rounded-full font-medium ${depthColors[currentDepth] || depthColors[4]}`}>
+              {currentStage} · {depthLabels[currentDepth] || '深度追问'}
+            </span>
+            <button
+              onClick={handleEndInterview}
+              disabled={messages.length <= 1 || isGeneratingReport}
+              className="text-sm px-4 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-full border border-red-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isGeneratingReport ? '生成报告中...' : '结束面试'}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -369,6 +445,13 @@ function InterviewPage({ onPageChange, onSaveReport }) {
                     : 'bg-gradient-to-r from-blue-500 to-blue-600 text-white shadow-lg shadow-blue-500/20'
                 }`}
               >
+                {message.role === 'assistant' && message.depth > 0 && (
+                  <div className="mb-3">
+                    <span className={`text-xs px-2 py-1 rounded-full ${depthColors[message.depth] || depthColors[4]}`}>
+                      {depthLabels[message.depth] || '深度追问'}
+                    </span>
+                  </div>
+                )}
                 <p className="leading-relaxed whitespace-pre-wrap">{message.content}</p>
               </div>
             </div>
@@ -386,6 +469,13 @@ function InterviewPage({ onPageChange, onSaveReport }) {
                   <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
                   <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
                 </div>
+              </div>
+            </div>
+          )}
+          {isGeneratingReport && (
+            <div className="flex justify-center">
+              <div className="bg-blue-50 border border-blue-200 px-6 py-3 rounded-2xl">
+                <p className="text-blue-700 font-medium">正在生成逐句点评报告...</p>
               </div>
             </div>
           )}
@@ -413,7 +503,7 @@ function InterviewPage({ onPageChange, onSaveReport }) {
           <button
             className="w-14 h-14 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white rounded-2xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-blue-500/20 hover:shadow-xl hover:shadow-blue-500/30 hover:-translate-y-0.5 active:scale-95 flex items-center justify-center"
             onClick={handleSend}
-            disabled={!inputValue.trim() || isTyping}
+            disabled={!inputValue.trim() || isTyping || isGeneratingReport}
           >
             <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
@@ -425,8 +515,28 @@ function InterviewPage({ onPageChange, onSaveReport }) {
   );
 }
 
-// 报告页面
+// 报告页面 - 逐句点评模式
 function ReportPage({ report, onRestart }) {
+  const [expandedRounds, setExpandedRounds] = useState(new Set());
+
+  const toggleRound = (index) => {
+    setExpandedRounds(prev => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  };
+
+  const verdictConfig = {
+    good: { icon: '✅', label: '优秀', color: 'bg-green-100 text-green-700 border-green-200' },
+    ok: { icon: '⚠️', label: '合格', color: 'bg-yellow-100 text-yellow-700 border-yellow-200' },
+    bad: { icon: '❌', label: '待改进', color: 'bg-red-100 text-red-700 border-red-200' }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
       {/* 导航栏 */}
@@ -447,7 +557,7 @@ function ReportPage({ report, onRestart }) {
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
             </svg>
-            返回首页
+            再来一次
           </button>
         </div>
       </nav>
@@ -456,12 +566,12 @@ function ReportPage({ report, onRestart }) {
       <div className="container mx-auto px-6 py-10 max-w-5xl">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">面试复盘报告</h1>
-          <p className="text-gray-500">基于 AI 分析的综合评估</p>
+          <p className="text-gray-500">{report.overall_summary || '基于 AI 分析的综合评估'}</p>
         </div>
 
         <div className="space-y-6">
           {/* 能力评分 */}
-          <div className="bg-white rounded-3xl p-8 shadow-xl shadow-gray-200/50 border border-gray-100/50 hover:shadow-2xl hover:shadow-blue-500/5 transition-all duration-500">
+          <div className="bg-white rounded-3xl p-8 shadow-xl shadow-gray-200/50 border border-gray-100/50">
             <h2 className="text-gray-900 font-semibold text-xl mb-6 flex items-center gap-3">
               <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg flex items-center justify-center">
                 <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -480,8 +590,95 @@ function ReportPage({ report, onRestart }) {
             </div>
           </div>
 
+          {/* 逐句点评 - 核心功能 */}
+          {report.rounds && report.rounds.length > 0 && (
+            <div className="bg-white rounded-3xl p-8 shadow-xl shadow-gray-200/50 border border-gray-100/50">
+              <h2 className="text-gray-900 font-semibold text-xl mb-6 flex items-center gap-3">
+                <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-purple-600 rounded-lg flex items-center justify-center">
+                  <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                  </svg>
+                </div>
+                逐句点评
+                <span className="text-sm font-normal text-gray-400 ml-2">点击展开查看详细分析</span>
+              </h2>
+
+              <div className="space-y-4">
+                {report.rounds.map((round, index) => {
+                  const verdict = verdictConfig[round.verdict] || verdictConfig.ok;
+                  const isExpanded = expandedRounds.has(index);
+
+                  return (
+                    <div key={index} className="border border-gray-200 rounded-2xl overflow-hidden hover:border-gray-300 transition-colors">
+                      {/* 折叠头 */}
+                      <button
+                        onClick={() => toggleRound(index)}
+                        className="w-full px-6 py-4 flex items-center gap-4 hover:bg-gray-50 transition-colors text-left"
+                      >
+                        <span className={`text-sm px-3 py-1 rounded-full border ${verdict.color} font-medium`}>
+                          {verdict.icon} {verdict.label}
+                        </span>
+                        <span className="flex-1 text-gray-700 font-medium truncate">
+                          第{index + 1}轮：{round.question}
+                        </span>
+                        <svg
+                          className={`w-5 h-5 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7"/>
+                        </svg>
+                      </button>
+
+                      {/* 展开内容 */}
+                      {isExpanded && (
+                        <div className="px-6 pb-6 space-y-4">
+                          {/* 问题 */}
+                          <div>
+                            <p className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">面试官提问</p>
+                            <p className="text-gray-800 bg-gray-50 rounded-xl p-4">{round.question}</p>
+                          </div>
+
+                          {/* 你的回答 */}
+                          <div>
+                            <p className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">你的回答</p>
+                            <p className="text-gray-800 bg-blue-50 rounded-xl p-4">{round.answer}</p>
+                          </div>
+
+                          {/* 点评 */}
+                          <div className={`rounded-xl p-4 ${
+                            round.verdict === 'good' ? 'bg-green-50 border border-green-200' :
+                            round.verdict === 'bad' ? 'bg-red-50 border border-red-200' :
+                            'bg-yellow-50 border border-yellow-200'
+                          }`}>
+                            <p className="text-xs font-medium uppercase tracking-wider mb-2" style={{
+                              color: round.verdict === 'good' ? '#16a34a' : round.verdict === 'bad' ? '#dc2626' : '#ca8a04'
+                            }}>
+                              {verdict.icon} 点评
+                            </p>
+                            <p className="text-gray-700 leading-relaxed">{round.comment}</p>
+                          </div>
+
+                          {/* 改进建议 */}
+                          {round.improved_answer && (
+                            <div className="bg-purple-50 border border-purple-200 rounded-xl p-4">
+                              <p className="text-xs font-medium text-purple-600 uppercase tracking-wider mb-2">💡 如果重来一次，建议这样答</p>
+                              <p className="text-gray-700 leading-relaxed">{round.improved_answer}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* 亮点 */}
-          <div className="bg-white rounded-3xl p-8 shadow-xl shadow-gray-200/50 border border-gray-100/50 hover:shadow-2xl hover:shadow-green-500/5 transition-all duration-500">
+          <div className="bg-white rounded-3xl p-8 shadow-xl shadow-gray-200/50 border border-gray-100/50">
             <h2 className="text-gray-900 font-semibold text-xl mb-6 flex items-center gap-3">
               <div className="w-8 h-8 bg-gradient-to-br from-green-500 to-green-600 rounded-lg flex items-center justify-center">
                 <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -492,7 +689,7 @@ function ReportPage({ report, onRestart }) {
             </h2>
             <ul className="space-y-4">
               {(report.highlights || []).map((item, index) => (
-                <li key={index} className="flex items-start gap-4 p-4 bg-gradient-to-r from-green-50 to-transparent rounded-xl hover:from-green-100 transition-colors">
+                <li key={index} className="flex items-start gap-4 p-4 bg-gradient-to-r from-green-50 to-transparent rounded-xl">
                   <div className="w-8 h-8 bg-gradient-to-br from-green-500 to-green-600 rounded-lg flex items-center justify-center flex-shrink-0 shadow-lg shadow-green-500/20">
                     <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/>
@@ -505,7 +702,7 @@ function ReportPage({ report, onRestart }) {
           </div>
 
           {/* 待改进点 */}
-          <div className="bg-white rounded-3xl p-8 shadow-xl shadow-gray-200/50 border border-gray-100/50 hover:shadow-2xl hover:shadow-yellow-500/5 transition-all duration-500">
+          <div className="bg-white rounded-3xl p-8 shadow-xl shadow-gray-200/50 border border-gray-100/50">
             <h2 className="text-gray-900 font-semibold text-xl mb-6 flex items-center gap-3">
               <div className="w-8 h-8 bg-gradient-to-br from-yellow-500 to-orange-500 rounded-lg flex items-center justify-center">
                 <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -516,7 +713,7 @@ function ReportPage({ report, onRestart }) {
             </h2>
             <ul className="space-y-4">
               {(report.improvements || []).map((item, index) => (
-                <li key={index} className="flex items-start gap-4 p-4 bg-gradient-to-r from-yellow-50 to-transparent rounded-xl hover:from-yellow-100 transition-colors">
+                <li key={index} className="flex items-start gap-4 p-4 bg-gradient-to-r from-yellow-50 to-transparent rounded-xl">
                   <div className="w-8 h-8 bg-gradient-to-br from-yellow-500 to-orange-500 rounded-lg flex items-center justify-center flex-shrink-0 shadow-lg shadow-yellow-500/20">
                     <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01"/>
@@ -529,7 +726,7 @@ function ReportPage({ report, onRestart }) {
           </div>
 
           {/* 学习建议 */}
-          <div className="bg-white rounded-3xl p-8 shadow-xl shadow-gray-200/50 border border-gray-100/50 hover:shadow-2xl hover:shadow-blue-500/5 transition-all duration-500">
+          <div className="bg-white rounded-3xl p-8 shadow-xl shadow-gray-200/50 border border-gray-100/50">
             <h2 className="text-gray-900 font-semibold text-xl mb-6 flex items-center gap-3">
               <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg flex items-center justify-center">
                 <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -540,7 +737,7 @@ function ReportPage({ report, onRestart }) {
             </h2>
             <ul className="space-y-4">
               {(report.suggestions || []).map((item, index) => (
-                <li key={index} className="flex items-start gap-4 p-4 bg-gradient-to-r from-blue-50 to-transparent rounded-xl hover:from-blue-100 transition-colors">
+                <li key={index} className="flex items-start gap-4 p-4 bg-gradient-to-r from-blue-50 to-transparent rounded-xl">
                   <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg flex items-center justify-center flex-shrink-0 shadow-lg shadow-blue-500/20">
                     <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/>

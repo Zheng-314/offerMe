@@ -1,9 +1,14 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 import PyPDF2
 import json
 import httpx
 import os
+import random
+
+# 加载环境变量
+load_dotenv()
 
 # 获取API配置 - 直接从环境变量读取（Render 会自动设置）
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -31,8 +36,8 @@ app.add_middleware(
 )
 
 # 调用DeepSeek API
-async def call_llm(prompt: str, max_tokens: int = 1000) -> str:
-    """调用DeepSeek API"""
+async def call_llm(messages: list, max_tokens: int = 1000, temperature: float = 0.7) -> str:
+    """调用DeepSeek API，支持多轮对话"""
     if not DEEPSEEK_API_KEY:
         return "错误：未配置DEEPSEEK_API_KEY，请在backend/.env文件中配置"
 
@@ -46,18 +51,9 @@ async def call_llm(prompt: str, max_tokens: int = 1000) -> str:
                 },
                 json={
                     "model": "deepseek-chat",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "你是一位专业的产品经理面试官，善于挖掘候选人的产品思维、项目经验和专业能力。"
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
+                    "messages": messages,
                     "max_tokens": max_tokens,
-                    "temperature": 0.7
+                    "temperature": temperature
                 }
             )
             response.raise_for_status()
@@ -91,7 +87,11 @@ async def parse_resume(file):
 
 请只返回JSON，不要其他文字。"""
 
-            llm_response = await call_llm(parse_prompt, max_tokens=800)
+            messages = [
+                {"role": "system", "content": "你是简历解析专家，擅长从简历文本中提取结构化信息。"},
+                {"role": "user", "content": parse_prompt}
+            ]
+            llm_response = await call_llm(messages, max_tokens=800)
 
             # 尝试解析JSON
             try:
@@ -157,7 +157,11 @@ async def upload_resume(file: UploadFile = File(...), jd: str = Form(None)):
 
 每个问题后面用【问题】标记。请只返回问题列表，不要其他内容。"""
 
-        llm_response = await call_llm(prompt, max_tokens=800)
+        messages = [
+            {"role": "system", "content": "你是产品经理面试官，擅长根据简历生成针对性面试问题。"},
+            {"role": "user", "content": prompt}
+        ]
+        llm_response = await call_llm(messages, max_tokens=800)
 
         return {
             "success": True,
@@ -168,105 +172,169 @@ async def upload_resume(file: UploadFile = File(...), jd: str = Form(None)):
         return {"success": False, "error": str(e)}
 
 @app.post("/api/get-interview-response")
-async def get_interview_response(message: str = Form(...), stage: str = Form(...)):
+async def get_interview_response(
+    message: str = Form(...),
+    stage: str = Form(...),
+    depth: int = Form(0),
+    history: str = Form(""),
+    resume_context: str = Form("")
+):
+    """追问地狱模式：AI面试官会根据回答深度层层追问"""
     try:
-        # 根据不同阶段生成不同的回复策略
-        stage_prompts = {
-            "自我介绍": """你正在面试一位产品经理候选人。候选人刚刚完成自我介绍。
+        # 解析对话历史
+        conversation_history = []
+        if history:
+            try:
+                conversation_history = json.loads(history)
+            except:
+                pass
 
-请根据候选人的自我介绍，进行以下操作：
-1. 给予积极的反馈
-2. 提出1-2个针对性的追问问题，挖掘更多信息
-
-如果自我介绍很完整，可以说："感谢你的介绍。接下来我想深入了解你的项目经验..."然后提问一个具体问题。
-
-请保持专业、友好的语气。""",
-
-            "简历针对性提问": """你正在面试一位产品经理候选人，正在进行简历针对性提问。
-
-请根据候选人的回答，进行以下操作：
-1. 评估回答质量
-2. 如果回答不完整，继续追问
-3. 如果回答很好，提出下一个相关的问题
-4. 问题要具体，要求候选人举例说明
-
-请保持专业、深入的面试风格。""",
-
-            "技术能力考察": """你正在面试一位产品经理候选人，正在进行技术能力考察。
-
-重点关注：
-- 候选人对技术的理解深度
-- 是否能与技术团队有效沟通
-- 对新技术、AI技术的了解程度
-
-请提出具体的技术相关问题，如：如何与开发团队协作、如何评估技术可行性、对AI技术的理解等。
-
-请保持专业的面试风格。""",
-
-            "结束与反馈": """你正在结束一场产品经理模拟面试。
-
-请根据前面的对话，给出一个简洁的总结和反馈：
-1. 感谢候选人的参与
-2. 总结候选人的亮点
-3. 给出1-2个改进建议
-4. 表示面试结束
-
-请保持友好、鼓励的语气。"""
+        # 追问策略：不同深度对应不同追问风格
+        followup_strategies = {
+            0: "挖掘背景层",      # 第一次提问
+            1: "细节追问层",      # 追问细节
+            2: "挑战假设层",      # 质疑候选人的假设
+            3: "压力测试层",      # 压力场景
+            4: "认知边界层"       # 触及能力边界
         }
 
-        system_prompt = stage_prompts.get(stage, stage_prompts["简历针对性提问"])
+        strategy = followup_strategies.get(depth, "认知边界层")
 
-        # 调用LLM生成面试回复
-        response = await call_llm(
-            f"{system_prompt}\n\n候选人回答：{message}",
-            max_tokens=600
-        )
+        # 判断是否应该继续追问
+        should_continue = depth < 4  # 最多追问4层
+
+        # 构建系统提示词
+        system_prompt = f"""你是一位顶级产品经理面试官，风格严厉但专业。你正在面试一位产品经理候选人。
+
+当前阶段：{stage}
+当前追问深度：{depth}层（{strategy}）
+简历信息：{resume_context}
+
+## 你的追问策略（严格按照当前深度执行）
+
+### 深度0（挖掘背景层）：
+- 问"为什么做这个决定？"
+- 问"当时的核心目标和背景是什么？"
+- 要求候选人解释项目/经历的上下文
+
+### 深度1（细节追问层）：
+- 问"你具体是怎么做的？用了什么方法？"
+- 追问执行层面的细节
+- 要求候选人提供具体数据、指标、样本量
+
+### 深度2（挑战假设层）：
+- 质疑候选人的判断："你有没有考虑过另一种可能？"
+- 问"你的假设是什么？怎么验证的？"
+- 要求候选人解释为什么排除其他方案
+
+### 深度3（压力测试层）：
+- 制造压力场景："如果预算砍半/时间缩短/老板不同意，你怎么办？"
+- 问"你刚才说的和前面提到的XX似乎矛盾，怎么解释？"
+- 要求候选人在压力下做取舍决策
+
+### 深度4（认知边界层）：
+- 问到候选人明显答不上来的领域
+- 探索候选人知识体系的盲区
+- 用"如果重来一次，你会怎么做不同？"作为收尾
+
+## 规则：
+1. 每次只问1-2个问题，不要一次问太多
+2. 如果候选人回答敷衍或回避，追问得更狠
+3. 如果候选人回答很好，可以适当认可后再追问
+4. 语气专业但犀利，不废话
+5. 不要重复之前问过的问题"""
+
+        # 构建消息列表
+        messages = [{"role": "system", "content": system_prompt}]
+        for msg in conversation_history[-10:]:  # 最近10轮对话
+            messages.append(msg)
+        messages.append({"role": "user", "content": message})
+
+        response = await call_llm(messages, max_tokens=600)
 
         return {
             "success": True,
-            "response": response
+            "response": response,
+            "depth": depth + 1,  # 返回新的追问深度
+            "strategy": strategy
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 @app.post("/api/generate-report")
 async def generate_report(conversation: str = Form(...)):
+    """生成逐句点评报告"""
     try:
-        # 生成评估报告
-        report_prompt = f"""你是一位资深的产品经理和面试专家，请根据以下面试对话，生成一份详细的面试复盘报告。
+        # 生成评估报告 - 逐句点评模式
+        report_prompt = f"""你是一位资深的产品经理面试专家，请根据以下面试对话，生成一份**逐句点评**的复盘报告。
 
-面试对话：
-{conversation[:6000]}
+面试对话（JSON格式）：
+{conversation[:8000]}
 
 请以JSON格式返回报告，包含以下字段：
+
+```json
 {{
   "score": {{
-    "需求分析": 1-10的整数分数,
-    "产品思维": 1-10的整数分数,
-    "技术理解": 1-10的整数分数,
-    "沟通表达": 1-10的整数分数,
-    "问题解决": 1-10的整数分数
+    "需求分析": 1-10分,
+    "产品思维": 1-10分,
+    "技术理解": 1-10分,
+    "沟通表达": 1-10分,
+    "问题解决": 1-10分
   }},
+  "overall_summary": "一句话总评",
+  "rounds": [
+    {{
+      "question": "面试官的问题（简要）",
+      "answer": "候选人的回答（简要）",
+      "verdict": "good|ok|bad",
+      "comment": "点评：这句话好在哪/扣分在哪（2-3句话）",
+      "improved_answer": "如果重来一次，建议这样回答：（给出一个更好的回答示范，保持候选人的真实经历，但优化表达方式）"
+    }}
+  ],
   "highlights": [
-    "亮点1",
+    "亮点1（具体指出是哪一轮的哪个回答）",
     "亮点2",
     "亮点3"
   ],
   "improvements": [
-    "待改进点1",
+    "待改进点1（具体指出是哪一轮的哪个问题）",
     "待改进点2",
     "待改进点3"
   ],
   "suggestions": [
-    "学习建议1",
+    "学习建议1（针对薄弱项的具体行动建议）",
     "学习建议2",
     "学习建议3"
   ]
 }}
+```
 
-请只返回JSON，不要其他文字。分数要真实反映面试表现。"""
+## 逐句点评规则：
+1. **verdict判断**：
+   - "good"：回答结构清晰、有数据支撑、展示了深度思考
+   - "ok"：回答基本合格但缺乏亮点，可以更深入
+   - "bad"：回答敷衍、回避问题、逻辑混乱、缺乏具体例子
 
-        llm_response = await call_llm(report_prompt, max_tokens=1200)
+2. **comment要求**：
+   - 指出具体好在哪/差在哪（如"用了STAR结构，逻辑清晰"或"缺少量化数据"）
+   - 不要泛泛而谈，要针对具体内容
+
+3. **improved_answer要求**：
+   - 保持候选人的真实经历和项目
+   - 优化表达方式：加入数据、用STAR结构、展示深度思考
+   - 不要编造候选人没做过的事
+
+4. **highlights和improvements**：
+   - 必须引用具体的轮次（如"第2轮关于用户调研的回答"）
+
+请只返回JSON，不要其他文字。"""
+
+        messages = [
+            {"role": "system", "content": "你是产品经理面试复盘专家，擅长逐句分析面试表现。"},
+            {"role": "user", "content": report_prompt}
+        ]
+        llm_response = await call_llm(messages, max_tokens=3000, temperature=0.5)
 
         # 尝试解析JSON
         try:
@@ -282,8 +350,12 @@ async def generate_report(conversation: str = Form(...)):
             # 确保所有必需字段都存在
             if "score" not in report:
                 report["score"] = {"需求分析": 7, "产品思维": 7, "技术理解": 7, "沟通表达": 7, "问题解决": 7}
+            if "overall_summary" not in report:
+                report["overall_summary"] = "面试表现中规中矩，有提升空间"
+            if "rounds" not in report:
+                report["rounds"] = []
             if "highlights" not in report:
-                report["highlights"] = ["表现良好"]
+                report["highlights"] = ["完成面试"]
             if "improvements" not in report:
                 report["improvements"] = ["需要继续提升"]
             if "suggestions" not in report:
@@ -299,6 +371,8 @@ async def generate_report(conversation: str = Form(...)):
                 "success": True,
                 "report": {
                     "score": {"需求分析": 7, "产品思维": 7, "技术理解": 7, "沟通表达": 7, "问题解决": 7},
+                    "overall_summary": "面试完成，报告生成格式异常",
+                    "rounds": [],
                     "highlights": ["完成面试"],
                     "improvements": ["报告生成格式问题"],
                     "suggestions": ["建议重新生成"]
